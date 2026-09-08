@@ -1,6 +1,6 @@
 """Offline, auditable output package generation."""
 from __future__ import annotations
-import csv, json, shutil
+import csv, json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +28,7 @@ def export_package(result: ComparisonResult, output_dir: str | Path) -> Path:
     for directory in (report / "flagged", gerber, data, diagnostics): directory.mkdir(parents=True, exist_ok=True)
     snapshots = _snapshots(result, report / "flagged") if result.config.snapshot_generation else {}
     for region in result.regions: region.snapshot = snapshots.get(region.region_id)
-    payload = {"metadata": {"tool_version": __version__, "created_at": datetime.now(timezone.utc).isoformat(), "overall_result": result.overall_result}, "configuration": asdict(result.config), "alignment": result.alignment, "statistics": result.statistics(), "warnings": result.warnings, "regions": [r.as_dict() for r in result.regions], "outputs": {}}
+    payload = {"metadata": {"tool_version": __version__, "created_at": datetime.now(timezone.utc).isoformat(), "overall_result": result.overall_result}, "configuration": asdict(result.config), "alignment": result.alignment, "statistics": result.statistics(), "geometry_diagnostics": result.geometry_diagnostics, "warnings": result.warnings, "regions": [r.as_dict() for r in result.regions], "outputs": {}}
     (data / "comparison.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (data / "raw_differences.json").write_text(json.dumps(_geojson(result.raw_xor), indent=2), encoding="utf-8")
     with (data / "difference_regions.csv").open("w", newline="", encoding="utf-8") as stream:

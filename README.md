@@ -1,5 +1,7 @@
 # Universal Gerber Comparator
 
+By Shrihari Kulkarni
+
 This repository contains the V1, geometry-first comparison core for RS-274X Gerber layers. Its API is UI-neutral (`compare_gerbers`) so a Colab notebook, CLI, and future desktop application share one engine.
 
 ## Install and run
