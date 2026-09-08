@@ -39,7 +39,16 @@ def _polygonal_components(geometry):
     return []
 
 
-def _polygonal_geometry(geometry, *, label: str):
+def _has_non_polygonal_components(geometry):
+    """Whether a geometry has line/point content besides any polygonal copper."""
+    if geometry.is_empty or geometry.geom_type in {"Polygon", "MultiPolygon"}:
+        return False
+    if geometry.geom_type == "GeometryCollection":
+        return any(_has_non_polygonal_components(member) for member in geometry.geoms)
+    return True
+
+
+def _polygonal_geometry(geometry, *, label: str, warnings: list[str] | None = None):
     """Return all polygonal content from a validity-repair result.
 
     ``make_valid`` is allowed to return a GeometryCollection.  Gerber copper is
@@ -49,13 +58,23 @@ def _polygonal_geometry(geometry, *, label: str):
     _, _, Polygon, unary_union = _shapely()
     polygons = _polygonal_components(geometry)
     if not polygons:
-        if geometry.is_empty:
-            return Polygon()
-        raise GeometryError(f"{label} contains no polygonal copper geometry.")
+        # A validity repair can turn a zero-width or otherwise degenerate
+        # primitive into a line or point.  It carries no copper area, so it is
+        # represented explicitly as empty rather than failing the whole layer.
+        if warnings is not None and not geometry.is_empty:
+            warnings.append(
+                f"{label} produced no polygonal copper; non-area result treated as zero-area geometry."
+            )
+        return Polygon()
     try:
-        return unary_union(polygons)
+        result = unary_union(polygons)
     except Exception as exc:
         raise GeometryError(f"{label} polygonal components could not be unioned safely.") from exc
+    if _has_non_polygonal_components(geometry) and warnings is not None:
+        warnings.append(
+            f"{label} produced non-polygonal components; polygonal copper components were retained."
+        )
+    return result
 
 
 def _precision_normalize(geometry, *, label: str):
@@ -83,10 +102,18 @@ def normalize_geometry(geometry, *, label: str = "Geometry", warnings: list[str]
     _, _, Polygon, _ = _shapely()
     if geometry is None or geometry.is_empty: return Polygon()
     valid_before = geometry.is_valid
-    if valid_before:
+    if valid_before and geometry.geom_type in {"Polygon", "MultiPolygon"}:
         return geometry
+    if valid_before:
+        # The comparison model is copper-area based.  Valid collections and
+        # line/point-only inputs use the same explicit polygonal projection as
+        # repair results so degenerate primitives cannot poison a union.
+        normalized = _polygonal_geometry(geometry, label=label, warnings=warnings)
+        if not normalized.is_valid:
+            raise GeometryError(f"{label} polygonal normalization produced invalid geometry.")
+        return normalized
     repaired, method = _make_valid(geometry)
-    normalized = _polygonal_geometry(repaired, label=f"{label} repair")
+    normalized = _polygonal_geometry(repaired, label=f"{label} repair", warnings=warnings)
     if normalized.is_empty or not normalized.is_valid:
         raise GeometryError(f"{label} remains invalid after {method} repair.")
     if warnings is not None:
@@ -105,6 +132,9 @@ def safe_union(geometries: Iterable, *, label: str = "Geometry", warnings: list[
         normalize_geometry(item, label=f"{label} primitive {index}", warnings=warnings)
         for index, item in enumerate(inputs, 1)
     ]
+    normalized_inputs = [item for item in normalized_inputs if not item.is_empty]
+    if not normalized_inputs:
+        return Polygon()
     try:
         return normalize_geometry(unary_union(normalized_inputs), label=label, warnings=warnings)
     except Exception:
