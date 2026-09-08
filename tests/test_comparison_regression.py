@@ -1,7 +1,7 @@
 import pytest
 
 pytest.importorskip("shapely")
-from gerber_comparator.core import compare_gerbers
+from gerber_comparator.core import _local_deviation, compare_gerbers
 from gerber_comparator.model import ComparisonConfig
 
 def gerber(aperture="R,2X2", flashes=((1, 1),)):
@@ -27,3 +27,37 @@ def test_component_count_topology_change_is_flagged():
     result = compare(gerber(), gerber(flashes=((1, 1), (5, 1))))
     assert result.regions
     assert {region.classification_reason for region in result.regions} == {"TOPOLOGY_CHANGE"}
+
+
+def test_complete_object_removal_is_directional():
+    result = compare(gerber(), gerber(flashes=()))
+
+    assert not result.missing_geometry.is_empty
+    assert result.added_geometry.is_empty
+    assert {region.classification_reason for region in result.regions} == {"MISSING_FROM_WORKING"}
+    assert result.statistics()["missing_from_working"] == 1
+
+
+def test_complete_object_addition_is_directional():
+    result = compare(gerber(flashes=()), gerber())
+
+    assert result.missing_geometry.is_empty
+    assert not result.added_geometry.is_empty
+    assert {region.classification_reason for region in result.regions} == {"ADDED_IN_WORKING"}
+    assert result.statistics()["added_in_working"] == 1
+
+
+def test_partial_removal_reports_only_original_minus_working():
+    result = compare(gerber("R,2X2"), gerber("R,1X2"))
+
+    assert result.missing_geometry.area == pytest.approx(2)
+    assert result.added_geometry.is_empty
+    assert {region.classification_reason for region in result.regions} == {"MISSING_FROM_WORKING"}
+
+
+def test_local_deviation_handles_identical_and_empty_neighbourhoods():
+    from shapely.geometry import Polygon
+
+    geometry = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    assert _local_deviation(geometry, geometry, geometry, 0.1) == pytest.approx(0)
+    assert _local_deviation(geometry, geometry, Polygon(), 0.1) == float("inf")
