@@ -48,14 +48,23 @@ def _has_non_polygonal_components(geometry):
     return True
 
 
-def _polygonal_geometry(geometry, *, label: str, warnings: list[str] | None = None):
-    """Return all polygonal content from a validity-repair result.
+def _raw_polygonal_union(polygons, *, label: str):
+    """Union known polygonal members without invoking the public recovery API."""
+    _, _, _, unary_union = _shapely()
+    try:
+        return unary_union(polygons)
+    except Exception as exc:
+        raise GeometryError(f"{label} polygonal components could not be unioned safely.") from exc
 
-    ``make_valid`` is allowed to return a GeometryCollection.  Gerber copper is
-    area geometry, so retaining its polygonal members is lossless for the
-    comparison model while avoiding lines left behind by a self-intersection.
+
+def _polygonal_geometry(geometry, *, label: str, warnings: list[str] | None = None):
+    """Build a valid polygonal representation with bounded recovery stages.
+
+    This low-level function intentionally never calls :func:`safe_union` or
+    :func:`normalize_geometry`; that separation prevents recursive recovery
+    loops.  It retains every polygonal component of a ``make_valid`` result.
     """
-    _, _, Polygon, unary_union = _shapely()
+    _, _, Polygon, _ = _shapely()
     polygons = _polygonal_components(geometry)
     if not polygons:
         # A validity repair can turn a zero-width or otherwise degenerate
@@ -66,15 +75,48 @@ def _polygonal_geometry(geometry, *, label: str, warnings: list[str] | None = No
                 f"{label} produced no polygonal copper; non-area result treated as zero-area geometry."
             )
         return Polygon()
-    try:
-        result = unary_union(polygons)
-    except Exception as exc:
-        raise GeometryError(f"{label} polygonal components could not be unioned safely.") from exc
+    result = _raw_polygonal_union(polygons, label=label)
     if _has_non_polygonal_components(geometry) and warnings is not None:
         warnings.append(
             f"{label} produced non-polygonal components; polygonal copper components were retained."
         )
-    return result
+    if result.is_valid:
+        return result
+
+    # A first make_valid can produce polygonal components whose reconstructed
+    # union is still invalid due to precision artifacts. Repair that actual
+    # failed union before considering precision normalization.
+    repaired, method = _make_valid(result)
+    repaired_polygons = _polygonal_components(repaired)
+    if repaired_polygons:
+        recovered = _raw_polygonal_union(repaired_polygons, label=f"{label} second repair")
+        if recovered.is_valid:
+            if warnings is not None:
+                warnings.append(f"{label} polygonal reconstruction required a second {method} repair.")
+            return recovered
+    else:
+        # A non-empty polygonal input must not become empty silently during a
+        # recovery stage. This is irrecoverable rather than a zero-area input.
+        raise GeometryError(f"{label} lost all polygonal copper during {method} reconstruction repair.")
+
+    # Last resort: apply the documented 1 nm grid to the invalid union itself,
+    # then repeat make_valid and polygonal reconstruction once.
+    precision_result = _precision_normalize(result, label=f"{label} polygonal reconstruction")
+    precision_repaired, precision_method = _make_valid(precision_result)
+    precision_polygons = _polygonal_components(precision_repaired)
+    if precision_polygons:
+        recovered = _raw_polygonal_union(
+            precision_polygons, label=f"{label} precision reconstruction"
+        )
+        if recovered.is_valid:
+            if warnings is not None:
+                warnings.append(
+                    f"{label} polygonal reconstruction required 0.000001 mm precision normalization and {precision_method} repair."
+                )
+            return recovered
+    raise GeometryError(
+        f"{label} remains invalid after polygonal reconstruction, repair, and controlled precision recovery."
+    )
 
 
 def _precision_normalize(geometry, *, label: str):
@@ -112,10 +154,16 @@ def normalize_geometry(geometry, *, label: str = "Geometry", warnings: list[str]
         if not normalized.is_valid:
             raise GeometryError(f"{label} polygonal normalization produced invalid geometry.")
         return normalized
+    # A zero-area polygon can legitimately repair to a line or point.  Keep
+    # that case non-fatal, but never silently erase an input that carried
+    # polygonal area before repair.
+    source_has_area = bool(_polygonal_components(geometry)) and geometry.area > 0
     repaired, method = _make_valid(geometry)
     normalized = _polygonal_geometry(repaired, label=f"{label} repair", warnings=warnings)
-    if normalized.is_empty or not normalized.is_valid:
+    if not normalized.is_valid:
         raise GeometryError(f"{label} remains invalid after {method} repair.")
+    if normalized.is_empty and source_has_area:
+        raise GeometryError(f"{label} lost polygonal copper during {method} repair.")
     if warnings is not None:
         warnings.append(f"{label} was invalid and required GEOS {method} repair.")
     return normalized
